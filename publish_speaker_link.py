@@ -1,66 +1,128 @@
 import os
 import json
 import asyncio
+import logging
 from pathlib import Path
 from dotenv import load_dotenv
-from telethon import TelegramClient
+from telethon import TelegramClient, errors
 from telethon.tl.functions.channels import GetFullChannelRequest
 from telethon.tl.functions.phone import ExportGroupCallInviteRequest
 from telethon.tl.types import InputChannel, InputGroupCall
 
-# ─── Загрузка настроек из .env ────────────────────────────────────────────────
-load_dotenv()  # читает API_ID, API_HASH, PHONE, SESSION_NAME из .env
-api_id       = int(os.getenv("API_ID"))
-api_hash     = os.getenv("API_HASH")
-phone        = os.getenv("PHONE")
-session_name = os.getenv("SESSION_NAME", "voice_access_bot")
+# ─── Настройка логирования ─────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    handlers=[logging.StreamHandler()]
+)
+logger = logging.getLogger(__name__)
 
-client = TelegramClient(session_name, api_id, api_hash)
+# ─── Загрузка .env ─────────────────────────────────────────────────────────────
+load_dotenv()
+API_ID       = os.getenv("API_ID")
+API_HASH     = os.getenv("API_HASH")
+PHONE        = os.getenv("PHONE")
+SESSION_NAME = os.getenv("SESSION_NAME", "voice_access_bot")
+
+if not all([API_ID, API_HASH, PHONE]):
+    logger.error("Не заданы обязательные переменные окружения (API_ID, API_HASH, PHONE).")
+    raise SystemExit(1)
+
+client = TelegramClient(SESSION_NAME, int(API_ID), API_HASH)
+CONFIG_PATH = Path("config.json")
+
+def load_config():
+    if not CONFIG_PATH.exists() or not CONFIG_PATH.read_text().strip():
+        default = {"channels": {}}
+        CONFIG_PATH.write_text(json.dumps(default, indent=2), encoding="utf-8")
+        return default
+    try:
+        cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        if "channels" not in cfg or not isinstance(cfg["channels"], dict):
+            cfg["channels"] = {}
+        return cfg
+    except json.JSONDecodeError:
+        logger.warning("config.json повреждён — перезаписываю новую структуру.")
+        default = {"channels": {}}
+        CONFIG_PATH.write_text(json.dumps(default, indent=2), encoding="utf-8")
+        return default
 
 async def main():
-    await client.start(phone)
+    await client.start(PHONE)
 
-    # ─── Чтение списка каналов из config.json ────────────────────────────────────
-    cfg      = json.loads(Path("config.json").read_text())
-    channels = cfg["channels"]
-    print("Доступные каналы:", list(channels.keys()))
-    key      = input("Выберите канал: ").strip()
-    data     = channels[key]
-
-    # ─── Формируем InputChannel для запросов ────────────────────────────────────
-    channel = InputChannel(data["id"], data["hash"])
-
-    # ─── Получаем полный объект канала, чтобы взять текущий эфир ───────────────
-    full     = await client(GetFullChannelRequest(channel))
-    call_obj = full.full_chat.call
-    if not call_obj:
-        print("🚫 Эфир не запущен в этом канале.")
-        await client.disconnect()
+    # ─── Загрузка и проверка конфига ─────────────────────────────────────────────
+    config   = load_config()
+    channels = config["channels"]
+    if not channels:
+        logger.error("В config.json нет ни одного канала. Запустите setup_config.py.")
         return
 
-    # ─── Диагностика: выводим данные об эфире ───────────────────────────────────
-    print("✅ Эфир активен!")
-    print(f"  • call.id         = {call_obj.id}")
-    print(f"  • call.access_hash= {call_obj.access_hash}")
+    # ─── Выводим пронумерованный список каналов ──────────────────────────────────
+    print("Доступные каналы:")
+    keys = list(channels.keys())
+    for i, name in enumerate(keys, 1):
+        print(f" {i}. {name}")
+    # выбор по индексу
+    while True:
+        idx_str = input("Выберите канал номером: ").strip()
+        if idx_str.isdigit() and 1 <= int(idx_str) <= len(keys):
+            key = keys[int(idx_str) - 1]
+            break
+        logger.error("Неправильный ввод — введите число от 1 до %d.", len(keys))
 
-    # ─── Экспортируем ссылку с правом сразу говорить ─────────────────────────────
-    igc    = InputGroupCall(call_obj.id, call_obj.access_hash)
-    invite = await client(ExportGroupCallInviteRequest(igc, True))
-    raw    = invite.link                  # пример: 'https://t.me/c/123456/abcdef'
-    hsh    = raw.split("=").pop()         # оставляем только хеш
+    data    = channels[key]
+    channel = InputChannel(data["id"], data["hash"])
 
-    # ─── Генерируем deep-link для мобильного клиента ───────────────────────────
-    username     = full.chats[0].username
-    video_link   = f"https://t.me/{username}?videochat={hsh}"
-    voice_link   = f"https://t.me/{username}?voicechat={hsh}"
-    livestream   = f"https://t.me/{username}?livestream={hsh}"
+    # ─── Получаем полный объект канала и проверяем эфир ────────────────────────
+    try:
+        full     = await client(GetFullChannelRequest(channel))
+    except errors.RPCError as e:
+        logger.error("Ошибка при получении канала: %s", e)
+        return
 
-    print("\n🚀 Ссылки на эфир:")
-    print("▶ videochat link:  ", video_link)
-    print("▶ voicechat link:  ", voice_link)
-    print("▶ livestream link: ", livestream)
+    call_obj = getattr(full.full_chat, "call", None)
+    if not call_obj:
+        logger.info("🚫 Эфир не запущен в этом канале.")
+        return
+
+    logger.info("✅ Эфир активен! id=%s, access_hash=%s", call_obj.id, call_obj.access_hash)
+
+    # ─── Экспортируем спикер-ссылку ─────────────────────────────────────────────
+    igc = InputGroupCall(call_obj.id, call_obj.access_hash)
+    try:
+        invite = await client(ExportGroupCallInviteRequest(igc, True))
+    except errors.PublicChannelMissingError:
+        logger.error("Нельзя экспортировать ссылку: канал должен быть публичным.")
+        return
+    except errors.RPCError as e:
+        logger.error("RPC-ошибка при экспорте ссылки: %s", e)
+        return
+
+    raw         = invite.link
+    invite_hash = raw.split("=").pop()
+    username    = getattr(full.chats[0], "username", None)
+    if not username:
+        logger.error("Канал не имеет публичного @username — сделайте канал публичным.")
+        return
+
+    # ─── Генерация и пронумерованный вывод deep-link вариантов ──────────────────
+    variants = [
+        ("tg_universal",     f"tg://resolve?domain={username}&videochat={invite_hash}"),
+        ("https_videochat",  f"https://t.me/{username}?videochat={invite_hash}"),
+        ("https_voicechat",  f"https://t.me/{username}?voicechat={invite_hash}"),
+        ("https_livestream", f"https://t.me/{username}?livestream={invite_hash}"),
+        ("tg_voicechat",     f"tg://resolve?domain={username}&voicechat={invite_hash}"),
+        ("tg_livestream",    f"tg://resolve?domain={username}&livestream={invite_hash}"),
+    ]
+
+    print("\n🔹 Варианты ссылок для тестирования:")
+    for i, (label, url) in enumerate(variants, 1):
+        print(f" {i}. {label}: {url}")
 
     await client.disconnect()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Выход по Ctrl+C")
