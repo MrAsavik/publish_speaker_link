@@ -7,6 +7,7 @@ from telethon import TelegramClient, events, errors
 from telethon.tl.functions.channels import GetFullChannelRequest
 from telethon.tl.functions.phone    import ExportGroupCallInviteRequest
 from telethon.tl.types               import InputChannel, InputGroupCall
+from web_export import get_private_channel_link
 
 # ─── Чтение настроек ────────────────────────────────────────────────────────────
 load_dotenv()
@@ -134,8 +135,16 @@ async def on_number(ev):
         if not default:
             await ev.reply("❌ Default не задан. Сначала пункт 4.")
         else:
-            link, err = await export_link(default)
-            await ev.reply(err or f"🔹 Ссылка:\n{link}")
+            try:
+                # Пробуем через Web-автоматизацию
+                link = get_private_channel_link(
+                    username=cfg["channels"][default]["username"],
+                    profile_dir="C:/Users/you/AppData/Local/Google/Chrome/User Data"
+                )
+            except Exception as e:
+                await ev.reply(f"❌ Не удалось экспортировать через Web: {e}")
+            else:
+                await ev.reply(f"🔹 Ссылка (Web):\n{link}")
         return await on_start(ev)
 
     if choice == 6:
