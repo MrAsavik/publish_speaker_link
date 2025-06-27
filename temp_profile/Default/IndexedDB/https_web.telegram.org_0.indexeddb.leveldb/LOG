@@ -1,0 +1,6 @@
+2025/06/27-21:36:45.763 ad44 Creating DB D:\ZoneCode\personal\bot\publish_speaker_link\temp_profile\Default\IndexedDB\https_web.telegram.org_0.indexeddb.leveldb since it was missing.
+2025/06/27-21:36:45.766 ad44 Reusing MANIFEST D:\ZoneCode\personal\bot\publish_speaker_link\temp_profile\Default\IndexedDB\https_web.telegram.org_0.indexeddb.leveldb/MANIFEST-000001
+2025/06/27-21:36:46.170 ad44 Level-0 table #5: started
+2025/06/27-21:36:46.172 ad44 Level-0 table #5: 22478 bytes OK
+2025/06/27-21:36:46.174 ad44 Delete type=0 #3
+2025/06/27-21:36:46.175 a4a4 Manual compaction at level-0 from '\x00\x06\x00\x00\x00' @ 72057594037927935 : 1 .. '\x00\x07\x00\x00\x00' @ 0 : 0; will stop at (end)
