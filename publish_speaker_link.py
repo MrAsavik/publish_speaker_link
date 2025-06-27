@@ -10,7 +10,7 @@ from telethon.tl.functions.channels import GetFullChannelRequest
 from telethon.tl.functions.phone import ExportGroupCallInviteRequest
 from telethon.tl.types import InputChannel, InputGroupCall
 
-# ─── Настройка логирования ─────────────────────────────────────────────────────
+# ─── Логирование ───────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -25,32 +25,68 @@ if not all([API_ID, API_HASH, PHONE]):
     logger.error("Неполные креды: задайте API_ID, API_HASH и PHONE в .env")
     exit(1)
 
-client = TelegramClient(SESSION_NAME, int(API_ID), API_HASH)
+client      = TelegramClient(SESSION_NAME, int(API_ID), API_HASH)
 CONFIG_PATH = Path("config.json")
 DRAFT_PATH  = Path("draft_post.txt")
 
 def load_config():
-    # безопасная загрузка config.json
     if not CONFIG_PATH.exists() or not CONFIG_PATH.read_text().strip():
         CONFIG_PATH.write_text(json.dumps({"channels": {}}, indent=2), encoding="utf-8")
     try:
         cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         return cfg.get("channels", {})
     except json.JSONDecodeError:
-        logger.warning("config.json повреждён — перезаписываю.")
+        logger.warning("config.json повреждён — пересоздаю.")
         CONFIG_PATH.write_text(json.dumps({"channels": {}}, indent=2), encoding="utf-8")
         return {}
+
+def save_config(channels: dict):
+    with CONFIG_PATH.open("w", encoding="utf-8") as f:
+        json.dump({"channels": channels}, f, indent=2)
 
 async def main():
     await client.start(PHONE)
 
-    # 1) Выбор канала
     channels = load_config()
     if not channels:
         logger.error("Нет каналов в config.json — сначала запустите setup_config.py")
         return
 
-    print("Доступные каналы:")
+    # Меню управления метками
+    while True:
+        print("\nМеню:")
+        print(" 1. Показать и выбрать канал")
+        print(" 2. Удалить метку канала")
+        print(" 3. Выход")
+        choice = input("Ваш выбор (1-3): ").strip()
+        if choice == "1":
+            break
+        elif choice == "2":
+            keys = list(channels.keys())
+            if not keys:
+                print("Нечего удалять.")
+                continue
+            print("Метки каналов:")
+            for i, label in enumerate(keys, 1):
+                print(f" {i}. {label}")
+            idx = input(f"Введите номер метки для удаления (1–{len(keys)}) или Enter для отмены: ").strip()
+            if not idx:
+                continue
+            if idx.isdigit() and 1 <= int(idx) <= len(keys):
+                label = keys[int(idx)-1]
+                del channels[label]
+                save_config(channels)
+                logger.info("Метка '%s' удалена.", label)
+            else:
+                print("Неверный ввод.")
+        elif choice == "3":
+            await client.disconnect()
+            return
+        else:
+            print("Неверный пункт, попробуйте снова.")
+
+    # 1) Выбор канала
+    print("\nДоступные каналы:")
     keys = list(channels.keys())
     for i, name in enumerate(keys, 1):
         print(f" {i}. {name}")
@@ -90,30 +126,27 @@ async def main():
         logger.error("У канала нет @username — сделайте канал публичным.")
         return
 
-    # 4) Генерация двух рабочих ссылок
-    https_link = f"https://t.me/{username}?voicechat={hsh}"
-    tg_link    = f"tg://resolve?domain={username}&livestream={hsh}"
-    print("\n🔹 Ссылки:")
-    print(" 1) HTTPS-voicechat:", https_link)
-    print(" 2) TG-livestream: ", tg_link)
+    # 4) Единственная рабочая ссылка
+    voice_link = f"https://t.me/{username}?voicechat={hsh}"
+    print("\n🔹 Рабочая ссылка:")
+    print(f" • {voice_link}")
 
     # 5) Подготовка шаблона поста и черновика
     post_template = (
         "🎙 **Присоединяйтесь к эфиру прямо сейчас!**\n\n"
-        f"• Веб (голосовой чат):\n{https_link}\n\n"
-        f"• Мобильный (livestream):\n{tg_link}\n\n"
+        f"• Голосовой чат:\n{voice_link}\n\n"
         "— Отредактируйте этот текст при необходимости."
     )
     DRAFT_PATH.write_text(post_template, encoding="utf-8")
     logger.info("Черновик сохранён в %s", DRAFT_PATH)
 
     # 6) Опциональное отложенное отправление
-    if input("Запланировать отправку через 1 час? (y/N): ").strip().lower() == 'y':
+    if input("Запланировать публикацию через 1 час? (y/N): ").strip().lower() == 'y':
         send_time = datetime.utcnow() + timedelta(hours=1)
         await client.send_message(
             entity=channel,
             message=post_template,
-            schedule=send_time    # ← используем `schedule`, а не `schedule_date`
+            schedule=send_time
         )
         logger.info("Пост запланирован на %s UTC", send_time.strftime("%Y-%m-%d %H:%M"))
 
