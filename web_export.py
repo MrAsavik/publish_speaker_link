@@ -6,6 +6,31 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.chrome.service import Service
+def test_connection(profile_dir: str) -> bool:
+    """
+    Проверяет, удалось ли открыть Telegram Web с данным профилем.
+    Возвращает True, если подключение успешно, иначе False.
+    """
+    opts = Options()
+    opts.add_argument(f"--user-data-dir={profile_dir}")
+    try:
+        driver = webdriver.Chrome(ChromeDriverManager().install(), options=opts)
+    except Exception as e:
+        print("❌ Ошибка запуска Chrome:", e)
+        return False
+
+    try:
+        driver.get("https://web.telegram.org/k/")
+        WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "div#telegram-app"))
+        )
+        return True
+    except Exception as e:
+        print("❌ Ошибка при загрузке Telegram Web:", e)
+        return False
+    finally:
+        driver.quit()
 
 def get_private_channel_link(username: str, profile_dir: str) -> str:
     """
@@ -15,7 +40,8 @@ def get_private_channel_link(username: str, profile_dir: str) -> str:
     opts = Options()
     # Укажите путь к профилю, где вы уже залогинились в Telegram Web
     opts.add_argument(f"--user-data-dir={profile_dir}")
-    driver = webdriver.Chrome(ChromeDriverManager().install(), options=opts)
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=opts)
     wait = WebDriverWait(driver, 15)
 
     try:
