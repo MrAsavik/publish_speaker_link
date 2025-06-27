@@ -2,6 +2,7 @@ import os
 import json
 import asyncio
 import logging
+from datetime import datetime, timedelta
 from pathlib import Path
 from dotenv import load_dotenv
 from telethon import TelegramClient, errors
@@ -10,11 +11,7 @@ from telethon.tl.functions.phone import ExportGroupCallInviteRequest
 from telethon.tl.types import InputChannel, InputGroupCall
 
 # ─── Настройка логирования ─────────────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-    handlers=[logging.StreamHandler()]
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 # ─── Загрузка .env ─────────────────────────────────────────────────────────────
@@ -25,104 +22,102 @@ PHONE        = os.getenv("PHONE")
 SESSION_NAME = os.getenv("SESSION_NAME", "voice_access_bot")
 
 if not all([API_ID, API_HASH, PHONE]):
-    logger.error("Не заданы обязательные переменные окружения (API_ID, API_HASH, PHONE).")
-    raise SystemExit(1)
+    logger.error("Неполные креды: задайте API_ID, API_HASH и PHONE в .env")
+    exit(1)
 
 client = TelegramClient(SESSION_NAME, int(API_ID), API_HASH)
 CONFIG_PATH = Path("config.json")
+DRAFT_PATH  = Path("draft_post.txt")
 
 def load_config():
+    # безопасная загрузка config.json
     if not CONFIG_PATH.exists() or not CONFIG_PATH.read_text().strip():
-        default = {"channels": {}}
-        CONFIG_PATH.write_text(json.dumps(default, indent=2), encoding="utf-8")
-        return default
+        CONFIG_PATH.write_text(json.dumps({"channels": {}}, indent=2), encoding="utf-8")
     try:
         cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-        if "channels" not in cfg or not isinstance(cfg["channels"], dict):
-            cfg["channels"] = {}
-        return cfg
+        return cfg.get("channels", {})
     except json.JSONDecodeError:
-        logger.warning("config.json повреждён — перезаписываю новую структуру.")
-        default = {"channels": {}}
-        CONFIG_PATH.write_text(json.dumps(default, indent=2), encoding="utf-8")
-        return default
+        logger.warning("config.json повреждён — перезаписываю.")
+        CONFIG_PATH.write_text(json.dumps({"channels": {}}, indent=2), encoding="utf-8")
+        return {}
 
 async def main():
     await client.start(PHONE)
 
-    # ─── Загрузка и проверка конфига ─────────────────────────────────────────────
-    config   = load_config()
-    channels = config["channels"]
+    # 1) Выбор канала
+    channels = load_config()
     if not channels:
-        logger.error("В config.json нет ни одного канала. Запустите setup_config.py.")
+        logger.error("Нет каналов в config.json — сначала запустите setup_config.py")
         return
 
-    # ─── Выводим пронумерованный список каналов ──────────────────────────────────
     print("Доступные каналы:")
     keys = list(channels.keys())
     for i, name in enumerate(keys, 1):
         print(f" {i}. {name}")
-    # выбор по индексу
-    while True:
-        idx_str = input("Выберите канал номером: ").strip()
-        if idx_str.isdigit() and 1 <= int(idx_str) <= len(keys):
-            key = keys[int(idx_str) - 1]
-            break
-        logger.error("Неправильный ввод — введите число от 1 до %d.", len(keys))
-
-    data    = channels[key]
+    idx = int(input("Выберите канал номером: ").strip()) - 1
+    name = keys[idx]
+    data = channels[name]
     channel = InputChannel(data["id"], data["hash"])
 
-    # ─── Получаем полный объект канала и проверяем эфир ────────────────────────
+    # 2) Получение объекта эфира
     try:
-        full     = await client(GetFullChannelRequest(channel))
+        full = await client(GetFullChannelRequest(channel))
     except errors.RPCError as e:
         logger.error("Ошибка при получении канала: %s", e)
         return
 
-    call_obj = getattr(full.full_chat, "call", None)
-    if not call_obj:
-        logger.info("🚫 Эфир не запущен в этом канале.")
+    call = getattr(full.full_chat, "call", None)
+    if not call:
+        logger.info("Эфир не запущен в этом канале.")
         return
 
-    logger.info("✅ Эфир активен! id=%s, access_hash=%s", call_obj.id, call_obj.access_hash)
+    logger.info("Эфир: id=%s, access_hash=%s", call.id, call.access_hash)
 
-    # ─── Экспортируем спикер-ссылку ─────────────────────────────────────────────
-    igc = InputGroupCall(call_obj.id, call_obj.access_hash)
+    # 3) Экспорт спикер-ссылки
+    igc = InputGroupCall(call.id, call.access_hash)
     try:
         invite = await client(ExportGroupCallInviteRequest(igc, True))
     except errors.PublicChannelMissingError:
-        logger.error("Нельзя экспортировать ссылку: канал должен быть публичным.")
+        logger.error("Канал должен быть публичным для экспорта ссылки.")
         return
     except errors.RPCError as e:
-        logger.error("RPC-ошибка при экспорте ссылки: %s", e)
+        logger.error("RPC-ошибка при экспорте: %s", e)
         return
 
-    raw         = invite.link
-    invite_hash = raw.split("=").pop()
-    username    = getattr(full.chats[0], "username", None)
+    hsh = invite.link.split("=").pop()
+    username = getattr(full.chats[0], "username", None)
     if not username:
-        logger.error("Канал не имеет публичного @username — сделайте канал публичным.")
+        logger.error("У канала нет @username — сделайте канал публичным.")
         return
 
-    # ─── Генерация и пронумерованный вывод deep-link вариантов ──────────────────
-    variants = [
-        ("tg_universal",     f"tg://resolve?domain={username}&videochat={invite_hash}"),
-        ("https_videochat",  f"https://t.me/{username}?videochat={invite_hash}"),
-        ("https_voicechat",  f"https://t.me/{username}?voicechat={invite_hash}"),
-        ("https_livestream", f"https://t.me/{username}?livestream={invite_hash}"),
-        ("tg_voicechat",     f"tg://resolve?domain={username}&voicechat={invite_hash}"),
-        ("tg_livestream",    f"tg://resolve?domain={username}&livestream={invite_hash}"),
-    ]
+    # 4) Генерация двух рабочих ссылок
+    https_link = f"https://t.me/{username}?voicechat={hsh}"
+    tg_link    = f"tg://resolve?domain={username}&livestream={hsh}"
+    print("\n🔹 Ссылки:")
+    print(" 1) HTTPS-voicechat:", https_link)
+    print(" 2) TG-livestream: ", tg_link)
 
-    print("\n🔹 Варианты ссылок для тестирования:")
-    for i, (label, url) in enumerate(variants, 1):
-        print(f" {i}. {label}: {url}")
+    # 5) Подготовка шаблона поста и черновика
+    post_template = (
+        "🎙 **Присоединяйтесь к эфиру прямо сейчас!**\n\n"
+        f"• Веб (голосовой чат):\n{https_link}\n\n"
+        f"• Мобильный (livestream):\n{tg_link}\n\n"
+        "— Отредактируйте этот текст при необходимости."
+    )
+    DRAFT_PATH.write_text(post_template, encoding="utf-8")
+    logger.info("Черновик сохранён в %s", DRAFT_PATH)
+
+    # 6) Опциональное отложенное отправление
+    if input("Запланировать отправку через 1 час? (y/N): ").strip().lower() == 'y':
+        send_time = datetime.utcnow() + timedelta(hours=1)
+        await client.send_message(
+            entity=channel,
+            message=post_template,
+            schedule=send_time    # ← используем `schedule`, а не `schedule_date`
+        )
+        logger.info("Пост запланирован на %s UTC", send_time.strftime("%Y-%m-%d %H:%M"))
 
     await client.disconnect()
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Выход по Ctrl+C")
+    asyncio.run(main())
