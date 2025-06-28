@@ -3,6 +3,8 @@ import json
 import asyncio
 from pathlib import Path
 from dotenv import load_dotenv, find_dotenv
+import traceback
+import time
 
 from telethon import TelegramClient, events, errors
 from telethon.errors.rpcerrorlist import GroupcallInvalidError
@@ -28,7 +30,15 @@ if not all([API_ID, API_HASH, PHONE]):
     exit(1)
 if not CONFIG_PATH.exists():
     print("❌ Не найден config.json")
-    exit(1)
+    # Создаём новый config.json с пустыми настройками
+    default_cfg = {
+        "default": "",
+        "channels": {}
+    }
+    with CONFIG_PATH.open("w", encoding="utf-8") as f:
+        json.dump(default_cfg, f, ensure_ascii=False, indent=4)
+    print("ℹ️ Сгенерирован новый config.json")
+
 
 # В памяти состояние диалогов для меню и фоновой задачи
 state = {}
@@ -230,7 +240,19 @@ async def on_watch_stop(ev):
         await ev.reply("🛑 Остановил мониторинг эфиров.")
 
 # ─── 8. Запуск бота ─────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    client.start(phone=PHONE)
+async def main_loop():
+    # Запускаем Telethon и держим его до отключения
+    await client.start(phone=PHONE)
     print("🤖 Бот запущен, жду команд…")
-    client.run_until_disconnected()
+    await client.run_until_disconnected()
+
+if __name__ == "__main__":
+    # Бесконечный цикл с автоперезапуском при любой ошибке
+    while True:
+        try:
+            asyncio.run(main_loop())
+        except Exception:
+            # Печатаем стек и ждём перед перезапуском
+            traceback.print_exc()
+            print("❌ Клиент упал, перезапускаем через 5 секунд…")
+            time.sleep(5)
