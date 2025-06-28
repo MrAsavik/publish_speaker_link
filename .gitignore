@@ -3,3 +3,6 @@ logs/
 *.session
 *.session-journal
 config.json
+archive/
+__pycache__/
+.venv/
