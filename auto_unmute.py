@@ -5,6 +5,7 @@ from pathlib import Path
 from dotenv import load_dotenv, find_dotenv
 
 from telethon import TelegramClient, events, functions, errors
+from telethon.errors.rpcerrorlist import GroupCallInvalidError
 from telethon.tl.functions.channels import GetFullChannelRequest
 from telethon.tl.functions.phone import GetGroupCallRequest, EditGroupCallParticipantRequest
 from telethon.tl.types import InputChannel, InputGroupCall
@@ -88,7 +89,7 @@ async def watch_and_unmute(call):
                 continue
             try:
                 user_ent = await client.get_entity(uid)
-                await client(functions.phone.EditGroupCallParticipantRequest(
+                await client(EditGroupCallParticipantRequest(
                     call=call,
                     participant=user_ent,
                     muted=False
@@ -158,7 +159,6 @@ async def on_text(ev):
         return
     st[chat] = {**st, "last_msg_id": msg_id}
 
-    # Отмена и возврат в меню
     if txt == "0":
         return await on_start(ev)
 
@@ -166,7 +166,6 @@ async def on_text(ev):
     chs = cfg.get("channels", {})
     step = st.get("step")
 
-    # Добавление публичного или приватного канала
     if step == "1":
         if txt not in ("1", "2"):
             return await ev.reply("❌ Выберите 1 или 2")
@@ -189,7 +188,7 @@ async def on_text(ev):
 
     if step == "add_private":
         dialogs = await client.get_dialogs()
-        cands = [d for d in dialogs if d.is_channel and txt.lower() in (d.name or "").lower()]
+        cands = [d for d in dialogs if d.is_chat and txt.lower() in (d.name or "").lower()]
         if not cands:
             return await ev.reply("❌ Не найдено.")
         if len(cands) == 1:
@@ -214,7 +213,6 @@ async def on_text(ev):
         await ev.reply(f"✅ Приватный {label} сохранён")
         return await on_start(ev)
 
-    # Удаление канала
     if step == "3":
         if not txt.isdigit(): return await ev.reply("❌ Номер")
         idx = int(txt) - 1
@@ -225,7 +223,6 @@ async def on_text(ev):
         await ev.reply(f"🗑 Канал {label} удалён")
         return await on_start(ev)
 
-    # Установка default
     if step == "4":
         if not txt.isdigit(): return await ev.reply("❌ Номер")
         idx = int(txt) - 1
@@ -240,17 +237,23 @@ async def on_text(ev):
 async def on_watch(ev):
     """Запускает фоновую задачу по мониторингу эфиров и авто-размуту"""
     await ev.reply("👀 Запускаю мониторинг эфиров…")
-    
+
     async def background_watch():
         while True:
-            call = await get_group_call()
-            if call:
-                await ev.reply("🎉 Эфир найден, начинаю размут…")
-                await watch_and_unmute(call)
-            else:
+            try:
+                call = await get_group_call()
+                if call:
+                    await ev.reply("🎉 Эфир найден, начинаю размут…")
+                    await watch_and_unmute(call)
+                else:
+                    await asyncio.sleep(30)
+            except GroupCallInvalidError:
+                await ev.reply("ℹ️ Эфир завершился, ожидаю следующего…")
+                await asyncio.sleep(30)
+            except Exception as e:
+                print(f"❌ Ошибка фонового мониторинга: {e}")
                 await asyncio.sleep(30)
 
-    # Запускаем фоновую задачу без блокировки бота
     client.loop.create_task(background_watch())
 
 # ─── 7. Запуск бота ─────────────────────────────────────────────────────────
