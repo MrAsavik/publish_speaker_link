@@ -3,7 +3,7 @@ import json
 import asyncio
 from pathlib import Path
 from dotenv import load_dotenv, find_dotenv
-
+from telethon.sessions import StringSession
 from telethon import TelegramClient, events, errors
 from telethon.errors.rpcerrorlist import GroupcallInvalidError
 from telethon.tl.functions.channels import GetFullChannelRequest
@@ -55,8 +55,11 @@ def format_channels(cfg):
     return "\n".join(lines)
 
 # ─── 3. Инициализация Telethon-клиента ──────────────────────────────────────
-client = TelegramClient(SESSION_NAME, int(API_ID), API_HASH)
-
+client = TelegramClient(
+    StringSession(os.getenv("SESSION_STRING")),
+    int(os.getenv("API_ID")),
+    os.getenv("API_HASH")
+)
 # ─── 4. Поиск и подготовка группового эфира ─────────────────────────────────
 async def get_group_call() -> InputGroupCall:
     cfg = load_config()
@@ -74,7 +77,7 @@ async def get_group_call() -> InputGroupCall:
         return None
     call = getattr(full.full_chat, "call", None)
     if not call:
-        print("ℹ️ Эфир не запущен в этом канале.")
+        #print("ℹ️ Эфир не запущен в этом канале.")
         return None
     return InputGroupCall(call.id, call.access_hash)
 
