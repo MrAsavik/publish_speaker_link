@@ -30,8 +30,9 @@ if not CONFIG_PATH.exists():
     print("❌ Не найден config.json")
     exit(1)
 
-# В памяти состояние диалогов для меню
+# В памяти состояние диалогов для меню и фоновой задачи
 state = {}
+bg_task = None  # ссылка на фоновую задачу мониторинга
 
 # ─── 2. Утилиты для работы с конфигом ──────────────────────────────────────
 def load_config():
@@ -125,38 +126,28 @@ async def on_menu(ev):
     choice = ev.text.strip()
     state[chat] = {"step": choice, "last": ev.message.id}
     cfg = load_config(); chs = cfg.get("channels", {})
-    if choice == "0":
-        return await on_start(ev)
-    if choice == "1":
-        return await ev.reply("🔐 Выберите тип канала:\n1. public\n2. private")
+    if choice == "0": return await on_start(ev)
+    if choice == "1": return await ev.reply("🔐 Выберите тип канала:\n1. public\n2. private")
     if choice == "2":
         await ev.reply("📋 Список каналов:\n" + format_channels(cfg))
         return await on_start(ev)
     if choice == "3":
-        if not chs:
-            await ev.reply("⚠️ Нет каналов.")
-            return await on_start(ev)
+        if not chs: await ev.reply("⚠️ Нет каналов."); return await on_start(ev)
         return await ev.reply("🗑 Введите номер для удаления (0 — отмена):\n" + format_channels(cfg))
     if choice == "4":
-        if not chs:
-            await ev.reply("⚠️ Нет каналов.")
-            return await on_start(ev)
+        if not chs: await ev.reply("⚠️ Нет каналов."); return await on_start(ev)
         return await ev.reply("🎯 Введите номер default (0 — отмена):\n" + format_channels(cfg))
 
 @client.on(events.NewMessage)
 async def on_text(ev):
-    chat = ev.chat_id
-    msg = ev.message.id
-    txt = ev.text.strip()
+    chat = ev.chat_id; msg = ev.message.id; txt = ev.text.strip()
     st = state.get(chat)
-    if not st or msg <= st.get("last", 0):
-        return
+    if not st or msg <= st.get("last", 0): return
     state[chat]["last"] = msg
-    if txt == "0":
-        return await on_start(ev)
+    if txt == "0": return await on_start(ev)
     cfg = load_config(); chs = cfg.get("channels", {})
     step = st.get("step")
-    # Add public
+    # добавить public/private
     if step == "1":
         if txt not in ("1","2"): return await ev.reply("❌ Выберите 1 или 2")
         state[chat]["step"] = f"add_{'public' if txt=='1' else 'private'}"
@@ -170,8 +161,7 @@ async def on_text(ev):
         chs[label] = {"id":ent.id,"hash":ent.access_hash}; cfg["channels"]=chs; save_config(cfg)
         await ev.reply(f"✅ Public {user} сохранён как {label}")
         return await on_start(ev)
-    # Add private
-    if step=="add_private":
+    if step == "add_private":
         dialogs = await client.get_dialogs()
         cands = [d for d in dialogs if d.is_channel and txt.lower() in (d.name or "").lower()]
         if not cands: return await ev.reply("❌ Не найдено.")
@@ -180,19 +170,18 @@ async def on_text(ev):
             chs[label]={"id":ent.id,"hash":ent.access_hash}; cfg["channels"]=chs; save_config(cfg)
             await ev.reply(f"✅ Приватный {label} сохранён")
             return await on_start(ev)
-        msg_text="\n".join(f"{i+1}. {d.name}" for i,d in enumerate(cands))
+        msg_text = "\n".join(f"{i+1}. {d.name}" for i,d in enumerate(cands))
         state[chat]["step"]="choose_private"; state[chat]["cands"]=cands
         return await ev.reply("Выберите номер (0 — отмена):\n"+msg_text)
-    if step=="choose_private":
+    if step == "choose_private":
         if not txt.isdigit(): return await ev.reply("❌ Номер")
-        idx=int(txt)-1
+        idx = int(txt)-1
         if idx<0 or idx>=len(state[chat]["cands"]): return await ev.reply("❌ Неверный")
         d=state[chat]["cands"][idx]; ent=d.entity; label=d.name
         chs[label]={"id":ent.id,"hash":ent.access_hash}; cfg["channels"]=chs; save_config(cfg)
         await ev.reply(f"✅ Приватный {label} сохранён")
         return await on_start(ev)
-    # Delete
-    if step=="3":
+    if step == "3":
         if not txt.isdigit(): return await ev.reply("❌ Номер")
         idx=int(txt)-1
         if idx<0 or idx>=len(chs): return await ev.reply("❌ Неверный")
@@ -200,8 +189,7 @@ async def on_text(ev):
         chs.pop(label); cfg["channels"]=chs; save_config(cfg)
         await ev.reply(f"🗑 Канал {label} удалён")
         return await on_start(ev)
-    # Default
-    if step=="4":
+    if step == "4":
         if not txt.isdigit(): return await ev.reply("❌ Номер")
         idx=int(txt)-1
         if idx<0 or idx>=len(chs): return await ev.reply("❌ Неверный")
@@ -210,26 +198,36 @@ async def on_text(ev):
         await ev.reply(f"🎯 Default установлен: {label}")
         return await on_start(ev)
 
-# ─── 7. Новый хендлер /watch ─────────────────────────────────────────────────
-@client.on(events.NewMessage(pattern=r"^/watch$"))
-async def on_watch(ev):
-    await ev.reply("👀 Запускаю мониторинг эфиров…")
-    async def background_watch():
-        while True:
-            try:
-                call = await get_group_call()
-                if call:
-                    await ev.reply("🎉 Эфир найден, начинаю размут…")
-                    await watch_and_unmute(call)
-                else:
+# ─── 7. Новый хендлер /watch и /stop ────────────────────────────────────────
+@client.on(events.NewMessage(pattern=r"^/(watch|stop)$"))
+async def on_watch_stop(ev):
+    global bg_task
+    cmd = ev.text[1:]
+    if cmd == "watch":
+        if bg_task and not bg_task.done():
+            return await ev.reply("⚠️ Мониторинг уже запущен.")
+        await ev.reply("👀 Запускаю мониторинг эфиров…")
+        async def background_watch():
+            while True:
+                try:
+                    call = await get_group_call()
+                    if call:
+                        await ev.reply("🎉 Эфир найден, начинаю размут…")
+                        await watch_and_unmute(call)
+                    else:
+                        await asyncio.sleep(30)
+                except GroupcallInvalidError:
+                    await ev.reply("ℹ️ Эфир завершился, ожидаю следующего…")
                     await asyncio.sleep(30)
-            except GroupcallInvalidError:
-                await ev.reply("ℹ️ Эфир завершился, ожидаю следующего…")
-                await asyncio.sleep(30)
-            except Exception as e:
-                print(f"❌ Ошибка фонового мониторинга: {e}")
-                await asyncio.sleep(30)
-    client.loop.create_task(background_watch())
+                except Exception as e:
+                    print(f"❌ Ошибка фонового мониторинга: {e}")
+                    await asyncio.sleep(30)
+        bg_task = client.loop.create_task(background_watch())
+    else:  # stop
+        if not bg_task or bg_task.done():
+            return await ev.reply("⚠️ Мониторинг не запущен.")
+        bg_task.cancel()
+        await ev.reply("🛑 Остановил мониторинг эфиров.")
 
 # ─── 8. Запуск бота ─────────────────────────────────────────────────────────
 if __name__ == "__main__":
