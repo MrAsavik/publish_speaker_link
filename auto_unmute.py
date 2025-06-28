@@ -4,8 +4,8 @@ import asyncio
 from pathlib import Path
 from dotenv import load_dotenv, find_dotenv
 
-from telethon import TelegramClient, events, functions, errors
-from telethon.errors.rpcerrorlist import GroupCallInvalidError
+from telethon import TelegramClient, events, errors
+from telethon.errors.rpcerrorlist import GroupcallInvalidError
 from telethon.tl.functions.channels import GetFullChannelRequest
 from telethon.tl.functions.phone import GetGroupCallRequest, EditGroupCallParticipantRequest
 from telethon.tl.types import InputChannel, InputGroupCall
@@ -33,7 +33,7 @@ if not CONFIG_PATH.exists():
 # В памяти состояние диалогов для меню
 state = {}
 
-# Функции для работы с файлом конфигурации
+# ─── 2. Утилиты для работы с конфигом ──────────────────────────────────────
 def load_config():
     with CONFIG_PATH.open(encoding="utf-8") as f:
         return json.load(f)
@@ -42,7 +42,6 @@ def save_config(cfg):
     with CONFIG_PATH.open("w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=4)
 
-# Хелпер для форматирования списка каналов
 def format_channels(cfg):
     chs = cfg.get("channels", {})
     default = cfg.get("default")
@@ -54,19 +53,19 @@ def format_channels(cfg):
         lines.append(f"{i}. {label}{mark}")
     return "\n".join(lines)
 
-# ─── 2. Инициализация Telethon-клиента ──────────────────────────────────────
+# ─── 3. Инициализация Telethon-клиента ──────────────────────────────────────
 client = TelegramClient(SESSION_NAME, int(API_ID), API_HASH)
 
-# ─── 3. Получаем InputGroupCall динамически по default из конфига ────────────
+# ─── 4. Поиск и подготовка группового эфира ─────────────────────────────────
 async def get_group_call() -> InputGroupCall:
     cfg = load_config()
-    default_label = cfg.get("default")
-    channels = cfg.get("channels", {})
-    if not default_label or default_label not in channels:
+    label = cfg.get("default")
+    chs = cfg.get("channels", {})
+    if not label or label not in chs:
         print("❌ Неправильный default в config.json")
         return None
-    ch = channels[default_label]
-    peer = InputChannel(ch["id"], ch["hash"])
+    data = chs[label]
+    peer = InputChannel(data["id"], data["hash"])
     try:
         full = await client(GetFullChannelRequest(peer))
     except errors.RPCError as e:
@@ -78,34 +77,33 @@ async def get_group_call() -> InputGroupCall:
         return None
     return InputGroupCall(call.id, call.access_hash)
 
-# ─── 4. Мониторинг и авто-размут ─────────────────────────────────────────────
-async def watch_and_unmute(call):
+# ─── 5. Мониторинг и авто-размут ─────────────────────────────────────────────
+async def watch_and_unmute(call: InputGroupCall):
     seen = set()
     while True:
-        resp = await client(GetGroupCallRequest(call=call, limit=200))
-        for part in resp.participants:
-            uid = getattr(part.peer, "user_id", None)
-            if not uid or uid in seen or not part.muted:
+        try:
+            resp = await client(GetGroupCallRequest(call=call, limit=200))
+        except GroupcallInvalidError:
+            # Эфир завершён, выйдем, чтобы background_watch заново искал эфир
+            raise
+        for p in resp.participants:
+            uid = getattr(p.peer, "user_id", None)
+            if not uid or uid in seen or not p.muted:
                 continue
             try:
-                user_ent = await client.get_entity(uid)
-                await client(EditGroupCallParticipantRequest(
-                    call=call,
-                    participant=user_ent,
-                    muted=False
-                ))
+                ent = await client.get_entity(uid)
+                await client(EditGroupCallParticipantRequest(call=call, participant=ent, muted=False))
                 print(f"✅ Размутил {uid}")
                 seen.add(uid)
             except errors.RPCError as e:
                 print(f"❌ Не смог размутить {uid}: {e}")
         await asyncio.sleep(15)
 
-# ─── 5. Обработчики меню управления (старая функциональность) ─────────────
+# ─── 6. Обработчики меню (/start и управление каналами) ────────────────────
 @client.on(events.NewMessage(pattern=r"^/start$"))
 async def on_start(ev):
-    """Показывает главное меню настройки каналов"""
     chat = ev.chat_id
-    state[chat] = {"step": "menu", "last_msg_id": ev.message.id}
+    state[chat] = {"step": "menu", "last": ev.message.id}
     cfg = load_config()
     menu = (
         "🛠 Главное меню:\n"
@@ -120,16 +118,13 @@ async def on_start(ev):
 
 @client.on(events.NewMessage(pattern=r"^[0-4]$"))
 async def on_menu(ev):
-    """Обрабатывает выбор пункта меню"""
     chat = ev.chat_id
     st = state.get(chat)
     if not st or st.get("step") != "menu":
         return
     choice = ev.text.strip()
-    cfg = load_config()
-    chs = cfg.get("channels", {})
-    state[chat] = {"step": choice, "last_msg_id": ev.message.id}
-
+    state[chat] = {"step": choice, "last": ev.message.id}
+    cfg = load_config(); chs = cfg.get("channels", {})
     if choice == "0":
         return await on_start(ev)
     if choice == "1":
@@ -150,94 +145,75 @@ async def on_menu(ev):
 
 @client.on(events.NewMessage)
 async def on_text(ev):
-    """Обрабатывает ввод для шагов меню"""
     chat = ev.chat_id
-    msg_id = ev.message.id
+    msg = ev.message.id
     txt = ev.text.strip()
     st = state.get(chat)
-    if not st or msg_id <= st.get("last_msg_id", 0):
+    if not st or msg <= st.get("last", 0):
         return
-    st[chat] = {**st, "last_msg_id": msg_id}
-
+    state[chat]["last"] = msg
     if txt == "0":
         return await on_start(ev)
-
-    cfg = load_config()
-    chs = cfg.get("channels", {})
+    cfg = load_config(); chs = cfg.get("channels", {})
     step = st.get("step")
-
+    # Add public
     if step == "1":
-        if txt not in ("1", "2"):
-            return await ev.reply("❌ Выберите 1 или 2")
-        st[chat]["step"] = f"add_{'public' if txt=='1' else 'private'}"
+        if txt not in ("1","2"): return await ev.reply("❌ Выберите 1 или 2")
+        state[chat]["step"] = f"add_{'public' if txt=='1' else 'private'}"
         return await ev.reply("Введите @username метка" if txt=='1' else "Введите часть названия канала")
-
     if step == "add_public":
         parts = txt.split()
-        if len(parts) != 2 or not parts[0].startswith("@"): 
-            return await ev.reply("❌ Формат: @username метка")
-        user, label = parts
-        try:
-            ent = await client.get_entity(user)
-        except Exception:
-            return await ev.reply(f"❌ Не найден {user}")
-        chs[label] = {"id": ent.id, "hash": ent.access_hash}
-        cfg["channels"] = chs; save_config(cfg)
+        if len(parts)!=2 or not parts[0].startswith("@"): return await ev.reply("❌ Формат: @username метка")
+        user,label = parts
+        try: ent = await client.get_entity(user)
+        except: return await ev.reply(f"❌ Не найден {user}")
+        chs[label] = {"id":ent.id,"hash":ent.access_hash}; cfg["channels"]=chs; save_config(cfg)
         await ev.reply(f"✅ Public {user} сохранён как {label}")
         return await on_start(ev)
-
-    if step == "add_private":
+    # Add private
+    if step=="add_private":
         dialogs = await client.get_dialogs()
-        cands = [d for d in dialogs if d.is_chat and txt.lower() in (d.name or "").lower()]
-        if not cands:
-            return await ev.reply("❌ Не найдено.")
-        if len(cands) == 1:
-            d = cands[0]; ent = d.entity; label = d.name
-            chs[label] = {"id": ent.id, "hash": ent.access_hash}
-            cfg["channels"] = chs; save_config(cfg)
+        cands = [d for d in dialogs if d.is_channel and txt.lower() in (d.name or "").lower()]
+        if not cands: return await ev.reply("❌ Не найдено.")
+        if len(cands)==1:
+            d=cands[0]; ent=d.entity; label=d.name
+            chs[label]={"id":ent.id,"hash":ent.access_hash}; cfg["channels"]=chs; save_config(cfg)
             await ev.reply(f"✅ Приватный {label} сохранён")
             return await on_start(ev)
-        msg = "\n".join(f"{i+1}. {d.name}" for i, d in enumerate(cands))
-        st[chat]["step"] = "choose_private"
-        st[chat]["cands"] = cands
-        return await ev.reply("Выберите номер (0 — отмена):\n" + msg)
-
-    if step == "choose_private":
+        msg_text="\n".join(f"{i+1}. {d.name}" for i,d in enumerate(cands))
+        state[chat]["step"]="choose_private"; state[chat]["cands"]=cands
+        return await ev.reply("Выберите номер (0 — отмена):\n"+msg_text)
+    if step=="choose_private":
         if not txt.isdigit(): return await ev.reply("❌ Номер")
-        idx = int(txt) - 1
-        if idx < 0 or idx >= len(st[chat].get("cands", [])):
-            return await ev.reply("❌ Неверный")
-        d = st[chat]["cands"][idx]; ent = d.entity; label = d.name
-        chs[label] = {"id": ent.id, "hash": ent.access_hash}
-        cfg["channels"] = chs; save_config(cfg)
+        idx=int(txt)-1
+        if idx<0 or idx>=len(state[chat]["cands"]): return await ev.reply("❌ Неверный")
+        d=state[chat]["cands"][idx]; ent=d.entity; label=d.name
+        chs[label]={"id":ent.id,"hash":ent.access_hash}; cfg["channels"]=chs; save_config(cfg)
         await ev.reply(f"✅ Приватный {label} сохранён")
         return await on_start(ev)
-
-    if step == "3":
+    # Delete
+    if step=="3":
         if not txt.isdigit(): return await ev.reply("❌ Номер")
-        idx = int(txt) - 1
-        if idx < 0 or idx >= len(chs): return await ev.reply("❌ Неверный")
-        label = list(chs.keys())[idx]
-        chs.pop(label)
-        cfg["channels"] = chs; save_config(cfg)
+        idx=int(txt)-1
+        if idx<0 or idx>=len(chs): return await ev.reply("❌ Неверный")
+        label=list(chs.keys())[idx]
+        chs.pop(label); cfg["channels"]=chs; save_config(cfg)
         await ev.reply(f"🗑 Канал {label} удалён")
         return await on_start(ev)
-
-    if step == "4":
+    # Default
+    if step=="4":
         if not txt.isdigit(): return await ev.reply("❌ Номер")
-        idx = int(txt) - 1
-        if idx < 0 or idx >= len(chs): return await ev.reply("❌ Неверный")
-        label = list(chs.keys())[idx]
-        cfg["default"] = label; save_config(cfg)
+        idx=int(txt)-1
+        if idx<0 or idx>=len(chs): return await ev.reply("❌ Неверный")
+        label=list(chs.keys())[idx]
+        cfg["default"]=label; save_config(cfg)
         await ev.reply(f"🎯 Default установлен: {label}")
         return await on_start(ev)
 
-# ─── 6. Новый хендлер /watch для фонового мониторинга ────────────────────────
+# ─── 7. Новый хендлер /watch ─────────────────────────────────────────────────
 @client.on(events.NewMessage(pattern=r"^/watch$"))
 async def on_watch(ev):
-    """Запускает фоновую задачу по мониторингу эфиров и авто-размуту"""
     await ev.reply("👀 Запускаю мониторинг эфиров…")
-
     async def background_watch():
         while True:
             try:
@@ -247,16 +223,15 @@ async def on_watch(ev):
                     await watch_and_unmute(call)
                 else:
                     await asyncio.sleep(30)
-            except GroupCallInvalidError:
+            except GroupcallInvalidError:
                 await ev.reply("ℹ️ Эфир завершился, ожидаю следующего…")
                 await asyncio.sleep(30)
             except Exception as e:
                 print(f"❌ Ошибка фонового мониторинга: {e}")
                 await asyncio.sleep(30)
-
     client.loop.create_task(background_watch())
 
-# ─── 7. Запуск бота ─────────────────────────────────────────────────────────
+# ─── 8. Запуск бота ─────────────────────────────────────────────────────────
 if __name__ == "__main__":
     client.start(phone=PHONE)
     print("🤖 Бот запущен, жду команд…")
